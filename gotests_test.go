@@ -1,11 +1,14 @@
 package gotests
 
 import (
+	"encoding/json"
 	"errors"
 	"go/types"
 	"io/ioutil"
 	"path"
 	"regexp"
+	"runtime"
+	"strings"
 	"testing"
 	"unicode"
 
@@ -14,14 +17,15 @@ import (
 
 func TestGenerateTests(t *testing.T) {
 	type args struct {
-		srcPath     string
-		only        *regexp.Regexp
-		excl        *regexp.Regexp
-		exported    bool
-		printInputs bool
-		subtests    bool
-		importer    types.Importer
-		templateDir string
+		srcPath            string
+		only               *regexp.Regexp
+		excl               *regexp.Regexp
+		exported           bool
+		printInputs        bool
+		subtests           bool
+		importer           types.Importer
+		templateDir        string
+		templateParamsPath string
 	}
 	tests := []struct {
 		name              string
@@ -606,8 +610,20 @@ func TestGenerateTests(t *testing.T) {
 			args: args{
 				srcPath: `testdata/undefinedtypes/interface_embedding.go`,
 			},
-			wantNoTests: true,
-			wantErr:     true,
+			want:        mustReadAndFormatGoFile(t, "testdata/goldens/interface_embedding.go"),
+			wantNoTests: !versionGreaterOrEqualThan("go1.11"),
+			wantErr:     !versionGreaterOrEqualThan("go1.11"),
+		},
+		{
+			name: "Test use external params and custom template",
+			args: args{
+				srcPath:            `testdata/use_template_params/use_template_params.go`,
+				templateDir:        `testdata/use_template_params/`,
+				templateParamsPath: `testdata/use_template_params/use_template_params.json`,
+			},
+			wantNoTests: false,
+			wantErr:     false,
+			want:        mustReadAndFormatGoFile(t, "testdata/goldens/use_template_params_test.go"),
 		},
 	}
 	tmp, err := ioutil.TempDir("", "gotests_test")
@@ -615,14 +631,25 @@ func TestGenerateTests(t *testing.T) {
 		t.Fatalf("ioutil.TempDir: %v", err)
 	}
 	for _, tt := range tests {
+		var params map[string]interface{}
+		var err error
+		if tt.args.templateParamsPath != "" {
+			params, err = loadExternalJsonFile(tt.args.templateParamsPath)
+			if err != nil {
+				t.Error(tt.name, err)
+				continue
+			}
+		}
+
 		gts, err := GenerateTests(tt.args.srcPath, &Options{
-			Only:        tt.args.only,
-			Exclude:     tt.args.excl,
-			Exported:    tt.args.exported,
-			PrintInputs: tt.args.printInputs,
-			Subtests:    tt.args.subtests,
-			Importer:    func() types.Importer { return tt.args.importer },
-			TemplateDir: tt.args.templateDir,
+			Only:           tt.args.only,
+			Exclude:        tt.args.excl,
+			Exported:       tt.args.exported,
+			PrintInputs:    tt.args.printInputs,
+			Subtests:       tt.args.subtests,
+			Importer:       func() types.Importer { return tt.args.importer },
+			TemplateDir:    tt.args.templateDir,
+			TemplateParams: params,
 		})
 		if (err != nil) != tt.wantErr {
 			t.Errorf("%q. GenerateTests(%v) error = %v, wantErr %v", tt.name, tt.args.srcPath, err, tt.wantErr)
@@ -646,10 +673,24 @@ func TestGenerateTests(t *testing.T) {
 	}
 }
 
+func versionGreaterOrEqualThan(version string) bool {
+	prefixes := []string{"go1.9", "go1.10", "go1.11", "go1.12", "go1.13"}
+	v := runtime.Version()
+	for _, prefix := range prefixes {
+		if strings.Contains(version, prefix) {
+			return true
+		}
+		if strings.Contains(v, prefix) {
+			return false
+		}
+	}
+	return true
+}
+
 func mustReadAndFormatGoFile(t *testing.T, filename string) string {
 	fmted, err := imports.Process(filename, nil, nil)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("reading and formatting file: %v", err)
 	}
 	return string(fmted)
 }
@@ -660,6 +701,17 @@ func outputResult(t *testing.T, tmpDir, testName string, got []byte) {
 		t.Errorf("ioutil.WriteFile: %v", err)
 	}
 	t.Logf(tmpResult)
+}
+
+func loadExternalJsonFile(file string) (map[string]interface{}, error) {
+	buf, err := ioutil.ReadFile(file)
+	if err != nil {
+		return nil, err
+	}
+
+	params := map[string]interface{}{}
+	err = json.Unmarshal(buf, &params)
+	return params, err
 }
 
 func toSnakeCase(s string) string {
